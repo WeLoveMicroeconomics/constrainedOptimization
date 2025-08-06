@@ -1,6 +1,7 @@
 import streamlit as st
 import numpy as np
 from sympy import symbols, sympify, diff, lambdify
+from scipy.optimize import minimize
 
 st.title("Constrained Optimization Solver with Kuhn-Tucker Conditions")
 

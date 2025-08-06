@@ -1,32 +1,31 @@
 import streamlit as st
 import numpy as np
-from sympy import symbols, sympify, diff, lambdify
-from scipy.optimize import minimize
+from sympy import symbols, sympify, diff, lambdify, Symbol
 
-st.title("Constrained Optimization Solver with Kuhn-Tucker Conditions")
+st.title("Constrained Optimization with Kuhn-Tucker Conditions")
 
-# Select number of variables
+# Variable selection
 n_vars = st.slider("Number of decision variables", min_value=1, max_value=6, value=2)
-x_vars = symbols(f'x1:{n_vars+1}')  # creates x1, x2, ..., xn
+x_vars = symbols(f'x1:{n_vars+1}')  # creates x1 to xn
 
-# Objective function input
+# Objective function
 st.subheader("Objective Function")
 obj_type = st.selectbox("Optimization Type", ["Minimize", "Maximize"])
-objective_str = st.text_input("Enter objective function (e.g. x1**2 + x2**2)", "x1**2 + x2**2")
+objective_str = st.text_input("Enter objective function (e.g., x1**2 + x2)", "x1**2 + x2")
 
-# Constraints input
-st.subheader("Constraints")
-num_constraints = st.slider("Number of constraints (up to 6)", 0, 6, 2)
+# Constraints
+st.subheader("Constraints (format: expr >= 0 or expr <= 0)")
+num_constraints = st.slider("Number of constraints", 0, 6, 2)
 constraint_list = []
 for i in range(num_constraints):
-    constraint_str = st.text_input(f"Constraint {i+1} (e.g. x1 + x2 - 1 <= 0)", f"x1 + x2 - {i+1} <= 0")
+    constraint_str = st.text_input(f"Constraint {i+1}", f"x1 + x2 - {i+1} <= 0")
     constraint_list.append(constraint_str)
 
-show_kkt = st.checkbox("Show Kuhn-Tucker Conditions")
+show_kkt = st.checkbox("Show full KKT steps")
 
 if st.button("Solve"):
 
-    # Parse the objective function
+    # Parse objective
     try:
         f_expr = sympify(objective_str)
         if obj_type == "Maximize":
@@ -39,43 +38,41 @@ if st.button("Solve"):
     # Initial guess
     x0 = np.ones(n_vars)
 
-    # Parse constraints
-scipy_constraints = []
-parsed_constraints = []
+    # Parse constraints (convert to g(x) ≥ 0)
+    scipy_constraints = []
+    parsed_constraints = []
 
-for con_str in constraint_list:
-    try:
-        if "<=" in con_str:
-            lhs, rhs = con_str.split("<=")
-            expr = sympify(rhs) - sympify(lhs)  # flip to match scipy's ≥ 0
+    for con_str in constraint_list:
+        try:
+            if "<=" in con_str:
+                lhs, rhs = con_str.split("<=")
+                expr = sympify(rhs) - sympify(lhs)  # convert to ≥ 0
+            elif ">=" in con_str:
+                lhs, rhs = con_str.split(">=")
+                expr = sympify(lhs) - sympify(rhs)  # already ≥ 0
+            else:
+                st.error("Constraint must contain '<=' or '>='.")
+                st.stop()
+
             func = lambdify([x_vars], expr, modules='numpy')
             scipy_constraints.append({'type': 'ineq', 'fun': func})
             parsed_constraints.append(expr)
-        elif ">=" in con_str:
-            lhs, rhs = con_str.split(">=")
-            expr = sympify(lhs) - sympify(rhs)  # already in ≥ 0 format
-            func = lambdify([x_vars], expr, modules='numpy')
-            scipy_constraints.append({'type': 'ineq', 'fun': func})
-            parsed_constraints.append(expr)
-        else:
-            st.error("Constraint must contain '<=' or '>='")
+        except Exception as e:
+            st.error(f"Constraint parse error: {e}")
             st.stop()
-    except Exception as e:
-        st.error(f"Error parsing constraint: {e}")
-        st.stop()
-        
-    # Run the optimizer
+
+    # Run optimizer
+    from scipy.optimize import minimize
     try:
         result = minimize(f_func, x0, constraints=scipy_constraints)
     except Exception as e:
         st.error(f"Optimization error: {e}")
         st.stop()
 
-    # Display results
     if result.success:
-        st.success("Optimization successful!")
-        optimal_value = -result.fun if obj_type == "Maximize" else result.fun
-        st.write(f"**Optimal value:** {optimal_value:.4f}")
+        st.success("Optimization successful.")
+        val = -result.fun if obj_type == "Maximize" else result.fun
+        st.write(f"**Optimal value:** {val:.4f}")
         st.write("**Solution:**")
         for i in range(n_vars):
             st.write(f"x{i+1} = {result.x[i]:.4f}")
@@ -83,23 +80,35 @@ for con_str in constraint_list:
         st.error("Optimization failed.")
         st.write(result.message)
 
-    # Show Kuhn-Tucker Conditions
+    # KKT conditions
     if show_kkt:
         st.subheader("Kuhn-Tucker Conditions")
 
-        st.markdown("**1. Stationarity**")
-        grad_f = [diff(f_expr, var) for var in x_vars]
-        for i, g in enumerate(grad_f):
-            st.latex(f"\\frac{{\\partial f}}{{\\partial x_{i+1}}} = {g}")
+        # Create Lagrange multipliers λ1, λ2, ...
+        lambdas = symbols(f'lambda1:{len(parsed_constraints)+1}')
+        L = f_expr
+        for lam, g in zip(lambdas, parsed_constraints):
+            L -= lam * g
 
-        st.markdown("**2. Primal Feasibility**")
-        for idx, g in enumerate(parsed_constraints):
-            st.latex(f"g_{{{idx+1}}}(x) = {g} \\leq 0")
+        st.markdown("### Lagrangian")
+        st.latex("L(x, \\lambda) = f(x) - \\sum \\lambda_i g_i(x)")
+        st.latex(f"L(x, λ) = {L}")
 
-        st.markdown("**3. Dual Feasibility**")
-        st.latex("\\lambda_i \\geq 0")
+        st.markdown("### 1. Stationarity (∇ₓL = 0)")
+        for i, x in enumerate(x_vars):
+            dLdx = diff(L, x)
+            st.latex(f"\\frac{{\\partial L}}{{\\partial x_{i+1}}} = {dLdx} = 0")
 
-        st.markdown("**4. Complementary Slackness**")
-        st.latex("\\lambda_i \\cdot g_i(x) = 0")
+        st.markdown("### 2. Primal Feasibility (constraints ≥ 0)")
+        for i, g in enumerate(parsed_constraints):
+            st.latex(f"g_{{{i+1}}}(x) = {g} \\geq 0")
 
-        st.info("Note: This version does not compute Lagrange multipliers numerically.")
+        st.markdown("### 3. Dual Feasibility (λ ≥ 0)")
+        for i in range(len(parsed_constraints)):
+            st.latex(f"\\lambda_{{{i+1}}} \\geq 0")
+
+        st.markdown("### 4. Complementary Slackness")
+        for i, g in enumerate(parsed_constraints):
+            st.latex(f"\\lambda_{{{i+1}}} \\cdot g_{{{i+1}}}(x) = 0")
+
+        st.info("This version displays symbolic KKT conditions. Solving them requires symbolic/numeric solvers.")

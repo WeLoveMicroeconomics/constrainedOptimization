@@ -32,7 +32,13 @@ if st.button("Solve"):
         lhs, rhs = c_str.split(">=")
         try:
             cons_expr = sp.sympify(lhs) - sp.sympify(rhs)
-            cons_func = sp.lambdify(x_syms, cons_expr, modules='numpy')
+            base_func = sp.lambdify(x_syms, cons_expr, modules='numpy')
+            
+            # Wrapper to convert output to float or float array
+            def cons_func(x, f=base_func):
+                val = f(*x)
+                return np.array(val).astype(float)
+            
             cons.append({'type': 'ineq', 'fun': cons_func})
         except Exception as e:
             st.error(f"Error parsing constraint '{c_str}': {e}")

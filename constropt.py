@@ -1,114 +1,87 @@
 import streamlit as st
-import numpy as np
-from sympy import symbols, sympify, diff, lambdify, Symbol
+import sympy as sp
 
-st.title("Constrained Optimization with Kuhn-Tucker Conditions")
+st.title("KKT Conditions Solver (Step-by-step)")
 
-# Variable selection
-n_vars = st.slider("Number of decision variables", min_value=1, max_value=6, value=2)
-x_vars = symbols(f'x1:{n_vars+1}')  # creates x1 to xn
+# Step 1: User inputs
+n_vars = st.slider("Number of decision variables", 1, 3, 2)
+n_cons = st.slider("Number of inequality constraints", 0, 3, 1)
 
-# Objective function
-st.subheader("Objective Function")
-obj_type = st.selectbox("Optimization Type", ["Minimize", "Maximize"])
-objective_str = st.text_input("Enter objective function (e.g., x1**2 + x2)", "x1**2 + x2")
+x_vars = sp.symbols(f'x1:{n_vars+1}')
+lambdas = sp.symbols(f'lambda1:{n_cons+1}')
 
-# Constraints
-st.subheader("Constraints (format: expr >= 0 or expr <= 0)")
-num_constraints = st.slider("Number of constraints", 0, 6, 2)
-constraint_list = []
-for i in range(num_constraints):
-    constraint_str = st.text_input(f"Constraint {i+1}", f"x1 + x2 - {i+1} <= 0")
-    constraint_list.append(constraint_str)
+obj_str = st.text_input("Objective function (e.g. x1**2 + x2)", "x1**2 + x2")
+constraint_strs = [st.text_input(f"Constraint {i+1} (e.g. x1 + x2 - 1 <= 0)", f"x1 + x2 - {i+1} <= 0") for i in range(n_cons)]
 
-show_kkt = st.checkbox("Show full KKT steps")
-
-if st.button("Solve"):
-
-    # Parse objective
+if st.button("Solve using KKT"):
     try:
-        f_expr = sympify(objective_str)
-        if obj_type == "Maximize":
-            f_expr = -f_expr
-        f_func = lambdify([x_vars], f_expr, modules='numpy')
+        f = sp.sympify(obj_str)
     except Exception as e:
         st.error(f"Invalid objective function: {e}")
         st.stop()
 
-    # Initial guess
-    x0 = np.ones(n_vars)
-
-    # Parse constraints (convert to g(x) ≥ 0)
-    scipy_constraints = []
-    parsed_constraints = []
-
-    for con_str in constraint_list:
-        try:
-            if "<=" in con_str:
-                lhs, rhs = con_str.split("<=")
-                expr = sympify(rhs) - sympify(lhs)  # convert to ≥ 0
-            elif ">=" in con_str:
-                lhs, rhs = con_str.split(">=")
-                expr = sympify(lhs) - sympify(rhs)  # already ≥ 0
-            else:
-                st.error("Constraint must contain '<=' or '>='.")
-                st.stop()
-
-            func = lambdify([x_vars], expr, modules='numpy')
-            scipy_constraints.append({'type': 'ineq', 'fun': func})
-            parsed_constraints.append(expr)
-        except Exception as e:
-            st.error(f"Constraint parse error: {e}")
+    g_list = []
+    for s in constraint_strs:
+        if "<=" in s:
+            lhs, rhs = s.split("<=")
+            g = sp.sympify(rhs) - sp.sympify(lhs)
+        elif ">=" in s:
+            lhs, rhs = s.split(">=")
+            g = sp.sympify(lhs) - sp.sympify(rhs)
+        else:
+            st.error("Constraints must include <= or >=")
             st.stop()
+        g_list.append(g)
 
-    # Run optimizer
-    from scipy.optimize import minimize
-    try:
-        result = minimize(f_func, x0, constraints=scipy_constraints)
-    except Exception as e:
-        st.error(f"Optimization error: {e}")
+    # Step 2: Construct the Lagrangian
+    L = f - sum(lambdas[i]*g_list[i] for i in range(n_cons))
+    st.markdown("### Lagrangian")
+    st.latex(f"L(x, \\lambda) = {sp.latex(L)}")
+
+    # Step 3: Compute gradients
+    st.markdown("### Stationarity Conditions")
+    stationarity = []
+    for i, x in enumerate(x_vars):
+        dLdx = sp.diff(L, x)
+        stationarity.append(dLdx)
+        st.latex(f"\\frac{{\\partial L}}{{\\partial x_{i+1}}} = {sp.latex(dLdx)} = 0")
+
+    # Step 4: Complementary slackness
+    st.markdown("### Complementary Slackness")
+    slackness = []
+    for i, g in enumerate(g_list):
+        cs = lambdas[i] * g
+        slackness.append(cs)
+        st.latex(f"\\lambda_{{{i+1}}} \\cdot g_{{{i+1}}}(x) = {sp.latex(cs)} = 0")
+
+    # Step 5: Dual feasibility
+    st.markdown("### Dual Feasibility")
+    for i in range(n_cons):
+        st.latex(f"\\lambda_{{{i+1}}} \geq 0")
+
+    # Step 6: Solve the system
+    st.markdown("### Solving the KKT System")
+    equations = stationarity + slackness + g_list  # primal feasibility implicit in g >= 0
+    sol = sp.solve(equations, x_vars + lambdas, dict=True, real=True)
+
+    if not sol:
+        st.warning("No KKT points found.")
         st.stop()
 
-    if result.success:
-        st.success("Optimization successful.")
-        val = -result.fun if obj_type == "Maximize" else result.fun
-        st.write(f"**Optimal value:** {val:.4f}")
-        st.write("**Solution:**")
-        for i in range(n_vars):
-            st.write(f"x{i+1} = {result.x[i]:.4f}")
+    feasible = []
+    st.markdown("### KKT Candidates")
+    for s in sol:
+        point = {v: s[v] for v in x_vars}
+        g_vals = [g.subs(s).evalf() for g in g_list]
+        lambda_vals = [s.get(l, 0) for l in lambdas]
+        feasible_flag = all(gv >= -1e-6 for gv in g_vals) and all(lv >= -1e-6 for lv in lambda_vals)
+        obj_val = f.subs(s).evalf()
+        st.write(f"Point: {point}, Objective: {obj_val:.4f}, Feasible: {feasible_flag}")
+        if feasible_flag:
+            feasible.append((point, obj_val))
+
+    if feasible:
+        best = min(feasible, key=lambda t: t[1])
+        st.success(f"Optimal Solution: {best[0]} with objective value {best[1]:.4f}")
     else:
-        st.error("Optimization failed.")
-        st.write(result.message)
-
-    # KKT conditions
-    if show_kkt:
-        st.subheader("Kuhn-Tucker Conditions")
-
-        # Create Lagrange multipliers λ1, λ2, ...
-        lambdas = symbols(f'lambda1:{len(parsed_constraints)+1}')
-        L = f_expr
-        for lam, g in zip(lambdas, parsed_constraints):
-            L -= lam * g
-
-        st.markdown("### Lagrangian")
-        st.latex("L(x, \\lambda) = f(x) - \\sum \\lambda_i g_i(x)")
-        st.latex(f"L(x, λ) = {L}")
-
-        st.markdown("### 1. Stationarity (∇ₓL = 0)")
-        for i, x in enumerate(x_vars):
-            dLdx = diff(L, x)
-            st.latex(f"\\frac{{\\partial L}}{{\\partial x_{i+1}}} = {dLdx} = 0")
-
-        st.markdown("### 2. Primal Feasibility (constraints ≥ 0)")
-        for i, g in enumerate(parsed_constraints):
-            st.latex(f"g_{{{i+1}}}(x) = {g} \\geq 0")
-
-        st.markdown("### 3. Dual Feasibility (λ ≥ 0)")
-        for i in range(len(parsed_constraints)):
-            st.latex(f"\\lambda_{{{i+1}}} \\geq 0")
-
-        st.markdown("### 4. Complementary Slackness")
-        for i, g in enumerate(parsed_constraints):
-            st.latex(f"\\lambda_{{{i+1}}} \\cdot g_{{{i+1}}}(x) = 0")
-
-        st.info("This version displays symbolic KKT conditions. Solving them requires symbolic/numeric solvers.")
+        st.warning("No feasible KKT points found.")

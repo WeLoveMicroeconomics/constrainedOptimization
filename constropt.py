@@ -7,8 +7,8 @@ st.title("Constrained Optimization Solver")
 
 n_vars = st.number_input("Number of variables", min_value=1, max_value=6, value=2, step=1)
 max_or_min = st.selectbox("Problem type", ["Minimize", "Maximize"])
-objective_str = st.text_input("Objective function in variables x1, x2, ...", "x1**2 + x2**2")
-n_cons = st.number_input("Number of inequality constraints (>= 0)", min_value=0, max_value=6, value=1, step=1)
+objective_str = st.text_input("Objective function in variables x1, x2, ...", "sqrt(x1*x2)")
+n_cons = st.number_input("Number of inequality constraints (>= 0)", min_value=0, max_value=6, value=3, step=1)
 constraints_str = [st.text_input(f"Constraint {i+1} (e.g. x1 + x2 - 1 >= 0)", "") for i in range(n_cons)]
 
 if st.button("Solve"):
@@ -17,7 +17,7 @@ if st.button("Solve"):
     
     try:
         obj_expr = sp.sympify(objective_str)
-        obj_func = sp.lambdify(x_syms, obj_expr, modules='numpy')
+        obj_func = sp.lambdify(x_syms, obj_expr, modules=['numpy'])
     except Exception as e:
         st.error(f"Error parsing objective function: {e}")
         st.stop()
@@ -33,12 +33,9 @@ if st.button("Solve"):
         try:
             cons_expr = sp.sympify(lhs) - sp.sympify(rhs)
             base_func = sp.lambdify(x_syms, cons_expr, modules='numpy')
-            
-            # Wrapper to convert output to float or float array
             def cons_func(x, f=base_func):
                 val = f(*x)
                 return np.array(val).astype(float)
-            
             cons.append({'type': 'ineq', 'fun': cons_func})
         except Exception as e:
             st.error(f"Error parsing constraint '{c_str}': {e}")
@@ -51,9 +48,10 @@ if st.button("Solve"):
         else:
             return val
 
-    x0 = np.zeros(n_vars)
+    x0 = np.array([1.0]*n_vars)  # initial guess well inside domain
+    bounds = [(0, None) for _ in range(n_vars)]  # enforce x_i >= 0
 
-    res = minimize(fun_to_minimize, x0, constraints=cons, method='SLSQP')
+    res = minimize(fun_to_minimize, x0, constraints=cons, bounds=bounds, method='SLSQP')
 
     if res.success:
         sol = res.x

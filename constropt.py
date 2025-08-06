@@ -8,7 +8,8 @@ st.title("Constrained Optimization Solver")
 def pretty_round(x, tol=1e-6):
     if abs(x - round(x)) < tol:
         return int(round(x))
-    return round(x, 6)
+    else:
+        return round(float(x), 6)
 
 # User inputs
 n_vars = st.number_input("Number of variables", min_value=1, max_value=6, value=2, step=1)
@@ -81,7 +82,7 @@ if st.button("Solve"):
         st.success(
             f"Optimal solution found:\n" +
             "\n".join([f"x{i+1} = {pretty_round(sol[i])}" for i in range(n_vars)]) +
-            f"\nObjective value: {round(val,6)}"
+            f"\nObjective value: {round(float(val),6)}"
         )
     else:
         st.error(f"Optimization failed: {res.message}")

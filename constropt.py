@@ -5,6 +5,11 @@ import sympy as sp
 
 st.title("Constrained Optimization Solver")
 
+def pretty_round(x, tol=1e-6):
+    if abs(x - round(x)) < tol:
+        return int(round(x))
+    return round(x, 6)
+
 # User inputs
 n_vars = st.number_input("Number of variables", min_value=1, max_value=6, value=2, step=1)
 max_or_min = st.selectbox("Problem type", ["Minimize", "Maximize"])
@@ -14,11 +19,9 @@ constraints_str = [st.text_input(f"Constraint {i+1} (e.g. x1 + x2 - 1 >= 0)", ""
 
 if st.button("Solve"):
 
-    # Define symbolic variables
     x_syms = sp.symbols(f'x1:{n_vars+1}')
     
     try:
-        # Parse objective
         obj_expr = sp.sympify(objective_str)
         obj_func = sp.lambdify(x_syms, obj_expr, modules=['numpy'])
     except Exception as e:
@@ -53,19 +56,15 @@ if st.button("Solve"):
         else:
             return val
 
-    # Initial guess inside domain
     x0 = np.array([1.0]*n_vars)
-    # Bounds for x_i >= 0
     bounds = [(0, None) for _ in range(n_vars)]
 
-    # Optimization options for higher precision
     options = {
         'ftol': 1e-12,
         'maxiter': 1000,
         'eps': 1e-12
     }
 
-    # Run optimization
     res = minimize(
         fun_to_minimize,
         x0,
@@ -81,8 +80,8 @@ if st.button("Solve"):
         val = res.fun if max_or_min == "Minimize" else -res.fun
         st.success(
             f"Optimal solution found:\n" +
-            "\n".join([f"x{i+1} = {sol[i]:.8f}" for i in range(n_vars)]) +
-            f"\nObjective value: {val:.8f}"
+            "\n".join([f"x{i+1} = {pretty_round(sol[i])}" for i in range(n_vars)]) +
+            f"\nObjective value: {round(val,6)}"
         )
     else:
         st.error(f"Optimization failed: {res.message}")

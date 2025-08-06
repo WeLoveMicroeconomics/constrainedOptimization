@@ -40,30 +40,30 @@ if st.button("Solve"):
     x0 = np.ones(n_vars)
 
     # Parse constraints
-    scipy_constraints = []
-    parsed_constraints = []
+scipy_constraints = []
+parsed_constraints = []
 
-    for con_str in constraint_list:
-        try:
-            if "<=" in con_str:
-                lhs, rhs = con_str.split("<=")
-                expr = sympify(lhs) - sympify(rhs)
-                func = lambdify([x_vars], expr, modules='numpy')
-                scipy_constraints.append({'type': 'ineq', 'fun': func})
-                parsed_constraints.append(expr)
-            elif ">=" in con_str:
-                lhs, rhs = con_str.split(">=")
-                expr = sympify(rhs) - sympify(lhs)  # flip to ≤ 0
-                func = lambdify([x_vars], expr, modules='numpy')
-                scipy_constraints.append({'type': 'ineq', 'fun': func})
-                parsed_constraints.append(expr)
-            else:
-                st.error("Constraint must contain '<=' or '>='")
-                st.stop()
-        except Exception as e:
-            st.error(f"Error parsing constraint: {e}")
+for con_str in constraint_list:
+    try:
+        if "<=" in con_str:
+            lhs, rhs = con_str.split("<=")
+            expr = sympify(rhs) - sympify(lhs)  # flip to match scipy's ≥ 0
+            func = lambdify([x_vars], expr, modules='numpy')
+            scipy_constraints.append({'type': 'ineq', 'fun': func})
+            parsed_constraints.append(expr)
+        elif ">=" in con_str:
+            lhs, rhs = con_str.split(">=")
+            expr = sympify(lhs) - sympify(rhs)  # already in ≥ 0 format
+            func = lambdify([x_vars], expr, modules='numpy')
+            scipy_constraints.append({'type': 'ineq', 'fun': func})
+            parsed_constraints.append(expr)
+        else:
+            st.error("Constraint must contain '<=' or '>='")
             st.stop()
-
+    except Exception as e:
+        st.error(f"Error parsing constraint: {e}")
+        st.stop()
+        
     # Run the optimizer
     try:
         result = minimize(f_func, x0, constraints=scipy_constraints)

@@ -1,8 +1,8 @@
 import streamlit as st
 import sympy as sp
 from itertools import product
-from sympy import nsolve
 
+st.set_page_config(page_title="KKT Solver", layout="wide")
 st.title("Kuhn-Tucker (KKT) Constrained Optimization Solver")
 
 # Step 1: User inputs
@@ -48,6 +48,7 @@ if submit:
             st.error(f"Invalid constraint: {con_str}")
             st.stop()
 
+    # Lagrange multipliers
     lambdas = sp.symbols(f"l0:{len(g_exprs)}", real=True, nonnegative=True)
 
     # Build Lagrangian
@@ -80,37 +81,33 @@ if submit:
                 eqs.append(sp.Eq(g_exprs[i], 0))
 
         all_syms = list(vars) + list(lambdas)
-        solve_syms = []
-        for i, sym in enumerate(all_syms):
-            if sym in lambdas and activity[lambdas.index(sym)] == 0:
-                continue
-            solve_syms.append(sym)
 
         try:
-            guess = [1.0] * len(solve_syms)
-            sol = nsolve(eqs, solve_syms, guess)
-            sol_dict = dict(zip(solve_syms, sol))
+            sol_set = sp.nonlinsolve(eqs, tuple(all_syms))
+            for sol in sol_set:
+                sol_dict = dict(zip(all_syms, sol))
 
-            for i, lam in enumerate(lambdas):
-                if lam not in sol_dict:
-                    sol_dict[lam] = 0.0
+                # Discard complex solutions
+                if any(v.has(sp.I) for v in sol_dict.values()):
+                    continue
 
-            feasible = all([g.subs(sol_dict).evalf() >= -1e-6 for g in g_exprs])
-            if feasible:
-                val = f.subs(sol_dict).evalf()
-                solutions.append((sol_dict, val, case_index))
+                # Check feasibility
+                feasible = all([g.subs(sol_dict).evalf() >= -1e-6 for g in g_exprs])
+                if feasible:
+                    val = f.subs(sol_dict).evalf()
+                    solutions.append((sol_dict, val, case_index))
         except Exception:
             pass
 
     if not solutions:
-        st.error("No feasible KKT solution found.")
+        st.error("❌ No feasible KKT solution found.")
     else:
         extrema_func = max if opt_type == "Maximize" else min
         best_val = None
         best_sol = None
 
         for sol, val, idx in solutions:
-            st.markdown(f"### Feasible KKT Case #{idx + 1}")
+            st.markdown(f"### ✅ Feasible KKT Case #{idx + 1}")
             latex_sol = ",\\ ".join([f"{str(k)} = {sp.latex(v)}" for k, v in sol.items()])
             st.latex(f"Solution:\\ {latex_sol}")
             st.latex(f"f = {val}")
@@ -118,7 +115,7 @@ if submit:
                 best_val = val
                 best_sol = sol
 
-        st.markdown("## ✅ Optimal Solution")
+        st.markdown("## 🏁 Optimal Solution")
         latex_best = ",\\ ".join([f"{str(k)} = {sp.latex(v)}" for k, v in best_sol.items()])
         st.latex(f"\\textbf{{Optimal}}:\\ {latex_best}")
         st.latex(f"\\textbf{{Optimal value}}:\\ f = {best_val}")

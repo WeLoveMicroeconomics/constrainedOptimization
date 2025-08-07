@@ -2,140 +2,182 @@ import streamlit as st
 import sympy as sp
 from itertools import product
 
-st.set_page_config(page_title="KKT Solver", layout="wide")
-st.title("Kuhn-Tucker (KKT) Constrained Optimization Solver")
+st.set_page_config(page_title="KKT Solver Robust", layout="wide")
+st.title("Robust Kuhn-Tucker (KKT) Solver with Case Enumeration")
 
-# Step 1: User inputs
 opt_type = st.selectbox("Choose optimization type", ["Maximize", "Minimize"])
-n_vars = st.slider("Number of choice variables", 1, 4, 2)
+n_vars = st.slider("Number of variables (up to 4)", 1, 4, 2)
 
-# Define variables with positive domain to help SymPy handle log/sqrt correctly
+# Define vars with positive=True (important for log/sqrt domain)
 vars = sp.symbols(f"x1:{n_vars+1}", real=True, positive=True)
 var_names = [str(v) for v in vars]
 
-# Objective function
 obj_str = st.text_input(f"Objective function f({', '.join(var_names)})", "log(x1) + log(x2)")
 
-# Constraints
-constraint_count = st.slider("Number of constraints (up to 8)", 1, 8, 3)
+n_constraints = st.slider("Number of constraints (up to 8)", 1, 8, 3)
 constraint_strs = []
-for i in range(constraint_count):
+for i in range(n_constraints):
     default = f"{var_names[i % n_vars]} >= 0"
     constraint_strs.append(st.text_input(f"Constraint #{i+1} (≥ 0)", default))
 
-submit = st.button("Solve")
+solve_button = st.button("Solve KKT")
 
-if submit:
-    st.markdown("## Step 1: Setup")
-
+if solve_button:
     try:
         f = sp.sympify(obj_str)
-    except:
+    except Exception:
         st.error("Invalid objective function.")
         st.stop()
 
-    # Parse constraints
     g_exprs = []
-    for con_str in constraint_strs:
+    for cs in constraint_strs:
         try:
-            if ">=" in con_str:
-                left, right = map(str.strip, con_str.split(">="))
+            if ">=" in cs:
+                left, right = map(str.strip, cs.split(">="))
                 g = sp.sympify(f"({left}) - ({right})")
             else:
-                g = sp.sympify(con_str)
+                g = sp.sympify(cs)
             g_exprs.append(g)
-        except:
-            st.error(f"Invalid constraint: {con_str}")
+        except Exception:
+            st.error(f"Invalid constraint: {cs}")
             st.stop()
 
-    # Lagrange multipliers (nonnegative)
+    # Multipliers
     lambdas = sp.symbols(f"l0:{len(g_exprs)}", real=True, nonnegative=True)
 
-    # Build Lagrangian
     L = f
     for lam, g in zip(lambdas, g_exprs):
         L += lam * g
 
-    focs = [sp.Eq(sp.diff(L, v), 0) for v in vars]
-    slack_conditions = [sp.Eq(lambdas[i] * g_exprs[i], 0) for i in range(len(g_exprs))]
+    dL_dx = [sp.diff(L, v) for v in vars]
 
-    st.markdown("### First-Order Conditions")
-    for eq in focs:
-        st.latex(sp.latex(eq))
+    # Complementary slackness cases: each multiplier zero or >0
+    # We'll represent >0 by None and 0 explicitly.
+    cases = list(product([0, None], repeat=len(g_exprs)))
 
-    st.markdown("### Complementary Slackness Conditions")
-    for i, cond in enumerate(slack_conditions):
-        g_latex = sp.latex(g_exprs[i])
-        st.latex(f"\\lambda_{{{i+1}}} \\geq 0,\\ g_{{{i+1}}}(x) = {g_latex} \\geq 0,\\ \\lambda_{{{i+1}}} \\cdot g_{{{i+1}}}(x) = 0")
-
-    st.markdown("## Step 2: Solving KKT Cases")
-    active_sets = list(product([0, 1], repeat=len(g_exprs)))
     solutions = []
 
-    def is_valid_solution(sol_dict):
-        # Check constraints
-        if not all([g.subs(sol_dict).evalf() >= -1e-6 for g in g_exprs]):
-            return False
+    st.markdown(f"### Trying {len(cases)} KKT complementary slackness cases...")
 
-        # Try evaluating objective function
-        try:
-            val = f.subs(sol_dict).evalf()
-            if not val.is_real or not val.is_finite:
-                return False
-        except:
-            return False
+    for case_i, case in enumerate(cases, 1):
+        eqs = []
+        subs = {}
 
-        # Domain enforcement for log/sqrt
-        for v in vars:
-            if any(fn in str(f) for fn in ["log", "sqrt"]):
-                if sol_dict[v].evalf() <= 0:
-                    return False
-
-        return True
-
-    for case_index, activity in enumerate(active_sets):
-        eqs = focs.copy()
-        for i, act in enumerate(activity):
-            if act == 0:
-                eqs.append(sp.Eq(lambdas[i], 0))
+        # Setup complementary slackness:
+        # lambda_i = 0 or g_i = 0
+        for i, val in enumerate(case):
+            if val == 0:
+                subs[lambdas[i]] = 0
             else:
                 eqs.append(sp.Eq(g_exprs[i], 0))
 
-        all_syms = list(vars) + list(lambdas)
+        # Add first order conditions, substitute zeros
+        for eq in dL_dx:
+            eqs.append(sp.Eq(eq.subs(subs), 0))
+
+        unknowns = list(vars)
+        unknowns += [lambdas[i] for i, val in enumerate(case) if val is None]
 
         try:
-            sol_set = sp.nonlinsolve(eqs, tuple(all_syms))
-            for sol in sol_set:
-                sol_dict = dict(zip(all_syms, sol))
-
-                # Skip complex/infinite solutions
-                if any((not v.is_real or not v.is_finite) for v in sol_dict.values()):
-                    continue
-
-                if is_valid_solution(sol_dict):
-                    val = f.subs(sol_dict).evalf()
-                    solutions.append((sol_dict, val, case_index))
-
-        except Exception:
+            sols = sp.solve(eqs, unknowns, dict=True)
+        except Exception as e:
+            st.write(f"Case {case_i}: Solve failed with error {e}")
             continue
+
+        if not sols:
+            st.write(f"Case {case_i}: No solution.")
+            continue
+
+        for sol in sols:
+            # Insert known multipliers
+            sol.update(subs)
+
+            # Validate solution
+            valid = True
+
+            # Check all vars positive
+            for v in vars:
+                val = sol.get(v, None)
+                if val is None or val.is_real is False or val.is_finite is False:
+                    valid = False
+                    break
+                try:
+                    if val.evalf() <= 0:
+                        valid = False
+                        break
+                except Exception:
+                    valid = False
+                    break
+            if not valid:
+                continue
+
+            # Check constraints g_i >= 0
+            for g in g_exprs:
+                try:
+                    val = g.subs(sol).evalf()
+                    if val < -1e-8:
+                        valid = False
+                        break
+                except Exception:
+                    valid = False
+                    break
+            if not valid:
+                continue
+
+            # Check multipliers nonnegative
+            for lam in lambdas:
+                val = sol.get(lam, 0)
+                if val.is_real is False or val.is_finite is False:
+                    valid = False
+                    break
+                try:
+                    if val.evalf() < -1e-8:
+                        valid = False
+                        break
+                except Exception:
+                    valid = False
+                    break
+            if not valid:
+                continue
+
+            # Check complementary slackness
+            for i, lam in enumerate(lambdas):
+                gval = g_exprs[i].subs(sol).evalf()
+                lamval = sol.get(lam, 0).evalf()
+                if abs(lamval * gval) > 1e-6:
+                    valid = False
+                    break
+            if not valid:
+                continue
+
+            # Evaluate objective
+            try:
+                val = f.subs(sol).evalf()
+                if not val.is_real or not val.is_finite:
+                    continue
+            except Exception:
+                continue
+
+            solutions.append((sol, val, case_i))
 
     if not solutions:
         st.error("❌ No feasible KKT solution found.")
     else:
-        extrema_func = max if opt_type == "Maximize" else min
-        best_val = None
-        best_sol = None
+        best_sol = max(solutions, key=lambda x: x[1]) if opt_type == "Maximize" else min(solutions, key=lambda x: x[1])
+        st.success(f"Found {len(solutions)} feasible solutions.")
 
-        for sol, val, idx in solutions:
-            st.markdown(f"### ✅ Feasible KKT Case #{idx + 1}")
-            latex_sol = ",\\ ".join([f"{sp.latex(k)} = {sp.latex(v)}" for k, v in sol.items()])
-            st.latex(f"Solution:\\ {latex_sol}")
+        for sol, val, case_i in solutions:
+            st.markdown(f"#### Case #{case_i} solution:")
+            items = []
+            for k in sorted(sol.keys(), key=lambda x: str(x)):
+                items.append(f"${sp.latex(k)} = {sp.latex(sol[k])}$")
+            st.latex(",\quad ".join(items))
             st.latex(f"f = {val}")
-            if best_val is None or extrema_func(val, best_val) == val:
-                best_val = val
-                best_sol = sol
 
-        st.markdown("## 🏁 Optimal Solution")
-        latex_best = ",\\ ".join([f"{sp.latex(k)} = {sp.latex(v)}" for k, v in best_sol.items()])
-        st.latex(f"\\textbf{{Optimal}}:\\ {latex_best}")
-        st.latex(f"\\textbf{{Optimal value}}:\\ f = {best_val}")
+        st.markdown("### 🏆 Optimal Solution:")
+        sol, val, case_i = best_sol
+        items = []
+        for k in sorted(sol.keys(), key=lambda x: str(x)):
+            items.append(f"${sp.latex(k)} = {sp.latex(sol[k])}$")
+        st.latex(",\quad ".join(items))
+        st.latex(f"\\textbf{{Optimal value}}: f = {val}")

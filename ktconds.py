@@ -9,8 +9,8 @@ st.title("Kuhn-Tucker (KKT) Constrained Optimization Solver")
 opt_type = st.selectbox("Choose optimization type", ["Maximize", "Minimize"])
 n_vars = st.slider("Number of choice variables", 1, 4, 2)
 
-# Define variables
-vars = sp.symbols(f"x1:{n_vars+1}", real=True)
+# Define variables with positive domain to help SymPy handle log/sqrt correctly
+vars = sp.symbols(f"x1:{n_vars+1}", real=True, positive=True)
 var_names = [str(v) for v in vars]
 
 # Objective function
@@ -48,7 +48,7 @@ if submit:
             st.error(f"Invalid constraint: {con_str}")
             st.stop()
 
-    # Lagrange multipliers
+    # Lagrange multipliers (nonnegative)
     lambdas = sp.symbols(f"l0:{len(g_exprs)}", real=True, nonnegative=True)
 
     # Build Lagrangian

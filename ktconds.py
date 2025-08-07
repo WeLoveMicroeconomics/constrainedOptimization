@@ -95,7 +95,7 @@ if submit:
                 # Check feasibility of constraints
                 feasibility = all([g.subs(sol_dict).evalf() >= -1e-6 for g in g_exprs])
 
-                # Also check domain of objective function
+                # Check domain of objective function
                 try:
                     val = f.subs(sol_dict).evalf()
                     if feasibility and val.is_real and val.is_finite:
@@ -114,4 +114,14 @@ if submit:
 
         for sol, val, idx in solutions:
             st.markdown(f"### ✅ Feasible KKT Case #{idx + 1}")
-            latex_sol = ",\_
+            latex_sol = ",\\ ".join([f"{sp.latex(k)} = {sp.latex(v)}" for k, v in sol.items()])
+            st.latex(f"Solution:\\ {latex_sol}")
+            st.latex(f"f = {val}")
+            if best_val is None or extrema_func(val, best_val) == val:
+                best_val = val
+                best_sol = sol
+
+        st.markdown("## 🏁 Optimal Solution")
+        latex_best = ",\\ ".join([f"{sp.latex(k)} = {sp.latex(v)}" for k, v in best_sol.items()])
+        st.latex(f"\\textbf{{Optimal}}:\\ {latex_best}")
+        st.latex(f"\\textbf{{Optimal value}}:\\ f = {best_val}")

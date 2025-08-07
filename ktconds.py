@@ -72,9 +72,29 @@ if submit:
     active_sets = list(product([0, 1], repeat=len(g_exprs)))
     solutions = []
 
+    def is_valid_solution(sol_dict):
+        # Check constraints
+        if not all([g.subs(sol_dict).evalf() >= -1e-6 for g in g_exprs]):
+            return False
+
+        # Try evaluating objective function
+        try:
+            val = f.subs(sol_dict).evalf()
+            if not val.is_real or not val.is_finite:
+                return False
+        except:
+            return False
+
+        # Domain enforcement for log/sqrt
+        for v in vars:
+            if any(fn in str(f) for fn in ["log", "sqrt"]):
+                if sol_dict[v].evalf() <= 0:
+                    return False
+
+        return True
+
     for case_index, activity in enumerate(active_sets):
         eqs = focs.copy()
-
         for i, act in enumerate(activity):
             if act == 0:
                 eqs.append(sp.Eq(lambdas[i], 0))
@@ -88,22 +108,16 @@ if submit:
             for sol in sol_set:
                 sol_dict = dict(zip(all_syms, sol))
 
-                # Discard complex or infinite solutions
+                # Skip complex/infinite solutions
                 if any((not v.is_real or not v.is_finite) for v in sol_dict.values()):
                     continue
 
-                # Check feasibility of constraints
-                feasibility = all([g.subs(sol_dict).evalf() >= -1e-6 for g in g_exprs])
-
-                # Check domain of objective function
-                try:
+                if is_valid_solution(sol_dict):
                     val = f.subs(sol_dict).evalf()
-                    if feasibility and val.is_real and val.is_finite:
-                        solutions.append((sol_dict, val, case_index))
-                except Exception:
-                    continue
+                    solutions.append((sol_dict, val, case_index))
+
         except Exception:
-            pass
+            continue
 
     if not solutions:
         st.error("❌ No feasible KKT solution found.")

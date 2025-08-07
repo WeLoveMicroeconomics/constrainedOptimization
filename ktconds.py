@@ -10,11 +10,11 @@ opt_type = st.selectbox("Choose optimization type", ["Maximize", "Minimize"])
 n_vars = st.slider("Number of choice variables", 1, 4, 2)
 
 # Define variables
-vars = sp.symbols(f"x1:{n_vars+1}")
+vars = sp.symbols(f"x1:{n_vars+1}", real=True)
 var_names = [str(v) for v in vars]
 
 # Objective function
-obj_str = st.text_input(f"Objective function f({', '.join(var_names)})", "x1 + x2")
+obj_str = st.text_input(f"Objective function f({', '.join(var_names)})", "log(x1) + log(x2)")
 
 # Constraints
 constraint_count = st.slider("Number of constraints (up to 8)", 1, 8, 3)
@@ -65,7 +65,8 @@ if submit:
 
     st.markdown("### Complementary Slackness Conditions")
     for i, cond in enumerate(slack_conditions):
-        st.latex(f"\\lambda_{{{i+1}}} \\geq 0,\\ g_{{{i+1}}}(x) \\geq 0,\\ {sp.latex(cond)}")
+        g_latex = sp.latex(g_exprs[i])
+        st.latex(f"\\lambda_{{{i+1}}} \\geq 0,\\ g_{{{i+1}}}(x) = {g_latex} \\geq 0,\\ \\lambda_{{{i+1}}} \\cdot g_{{{i+1}}}(x) = 0")
 
     st.markdown("## Step 2: Solving KKT Cases")
     active_sets = list(product([0, 1], repeat=len(g_exprs)))
@@ -87,15 +88,20 @@ if submit:
             for sol in sol_set:
                 sol_dict = dict(zip(all_syms, sol))
 
-                # Discard complex solutions
-                if any(v.has(sp.I) for v in sol_dict.values()):
+                # Discard complex or infinite solutions
+                if any((not v.is_real or not v.is_finite) for v in sol_dict.values()):
                     continue
 
-                # Check feasibility
-                feasible = all([g.subs(sol_dict).evalf() >= -1e-6 for g in g_exprs])
-                if feasible:
+                # Check feasibility of constraints
+                feasibility = all([g.subs(sol_dict).evalf() >= -1e-6 for g in g_exprs])
+
+                # Also check domain of objective function
+                try:
                     val = f.subs(sol_dict).evalf()
-                    solutions.append((sol_dict, val, case_index))
+                    if feasibility and val.is_real and val.is_finite:
+                        solutions.append((sol_dict, val, case_index))
+                except Exception:
+                    continue
         except Exception:
             pass
 
@@ -108,14 +114,4 @@ if submit:
 
         for sol, val, idx in solutions:
             st.markdown(f"### ✅ Feasible KKT Case #{idx + 1}")
-            latex_sol = ",\\ ".join([f"{str(k)} = {sp.latex(v)}" for k, v in sol.items()])
-            st.latex(f"Solution:\\ {latex_sol}")
-            st.latex(f"f = {val}")
-            if best_val is None or extrema_func(val, best_val) == val:
-                best_val = val
-                best_sol = sol
-
-        st.markdown("## 🏁 Optimal Solution")
-        latex_best = ",\\ ".join([f"{str(k)} = {sp.latex(v)}" for k, v in best_sol.items()])
-        st.latex(f"\\textbf{{Optimal}}:\\ {latex_best}")
-        st.latex(f"\\textbf{{Optimal value}}:\\ f = {best_val}")
+            latex_sol = ",\_

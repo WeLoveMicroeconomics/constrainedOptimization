@@ -115,7 +115,14 @@ if st.button("Solve symbolically"):
             active_idx = set(active_idx_tuple)
 
             # Build stationarity equations: grad f - sum(mu_i * grad g_i) = 0 (for active i only)
-            mus = sp.symbols(" ".join([f"mu{i}" for i in active_idx]), nonnegative=True)  # μ_i ≥ 0
+            # Build multipliers for active constraints; handle 0 or 1 elements robustly
+            mu_names = [f"mu{i}" for i in active_idx]
+            if len(mu_names) == 0:
+                mus = tuple()
+            else:
+                mus = sp.symbols(" ".join(mu_names), nonnegative=True)
+                if isinstance(mus, sp.Symbol):
+                    mus = (mus,)
             mu_map = dict(zip(active_idx, mus))
 
             stationarity_eqs = []

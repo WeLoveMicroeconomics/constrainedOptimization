@@ -3,7 +3,7 @@ import numpy as np
 from scipy.optimize import minimize, Bounds, NonlinearConstraint
 import sympy as sp
 
-st.title("Constrained Optimization Solver (scaled & polished)")
+st.title("Constrained Optimization Solver (robust, custom variables)")
 
 def pretty_round(x, tol=1e-6):
     try:
@@ -98,25 +98,36 @@ if st.button("Solve"):
         st.error(f"Error compiling objective: {e}")
         st.stop()
 
-    def obj_value(x):
-        val = obj_func(*x)
-        return float(np.asarray(val, dtype=float).reshape(()))
-
-    def obj_grad_x(x):
-        g = np.asarray(obj_grad(*x), dtype=float).ravel()
-        return g
-
     def obj_for_min(x):
-        v = obj_value(x)
+        val = obj_func(*x)
+        v = float(np.asarray(val, dtype=float).reshape(()))
         return -v if max_or_min == "Maximize" else v
 
     def grad_for_min(x):
-        g = obj_grad_x(x)
+        g = np.asarray(obj_grad(*x), dtype=float).ravel()
         return -g if max_or_min == "Maximize" else g
 
     # ---------- Constraints parsing (>=, <=, = supported) ----------
-    ineq_exprs = []  # g(x) >= 0
-    eq_exprs   = []  # h(x) = 0
+    #   - for >= : g(x) = lhs - rhs  (want g >= 0)
+    #   - for <= : g(x) = rhs - lhs  (want g >= 0)
+    #   - for  = : h(x) = lhs - rhs  (want h = 0)
+    ineq_funcs = []    # g(x)
+    ineq_grads = []    # ∇g
+    eq_funcs = []      # h(x)
+    eq_grads = []      # ∇h
+
+    def compile_scalar(expr):
+        return sp.lambdify(x_syms, expr, modules=LAMBDA_MODULES)
+    def compile_grad(expr):
+        grads = [sp.diff(expr, s) for s in x_syms]
+        return sp.lambdify(x_syms, grads, modules=LAMBDA_MODULES)
+
+    def add_ineq(expr):
+        ineq_funcs.append(compile_scalar(expr))
+        ineq_grads.append(compile_grad(expr))
+    def add_eq(expr):
+        eq_funcs.append(compile_scalar(expr))
+        eq_grads.append(compile_grad(expr))
 
     def split_constraint(text):
         if ">=" in text:
@@ -139,31 +150,45 @@ if st.button("Solve"):
         lhs_s, rhs_s, op = split_constraint(c_str)
         lhs = parse_and_validate(lhs_s, what=f"constraint {idx} (lhs)")
         rhs = parse_and_validate(rhs_s, what=f"constraint {idx} (rhs)")
-        expr = lhs - rhs
+        expr = sp.simplify(lhs - rhs)
         if op == ">=":
-            ineq_exprs.append(expr)
+            add_ineq(expr)
         elif op == "<=":
-            ineq_exprs.append(sp.expand(rhs - lhs))  # convert to >= 0
+            add_ineq(sp.simplify(rhs - lhs))
         else:
-            eq_exprs.append(expr)
+            add_eq(expr)
 
-    # Compile scalar & gradients
-    def compile_scalar(expr): return sp.lambdify(x_syms, expr, modules=LAMBDA_MODULES)
-    def compile_grad(expr):
-        grads = [sp.diff(expr, s) for s in x_syms]
-        return sp.lambdify(x_syms, grads, modules=LAMBDA_MODULES)
+    # ---------- SLSQP constraints with ANALYTIC JACOBIANS (FIX ⬅) ----------
+    slsqp_cons = []
+    for f_fun, g_fun in zip(ineq_funcs, ineq_grads):
+        def cons_fun(x, f=f_fun):
+            val = f(*x)
+            return float(np.asarray(val, dtype=float).reshape(()))   # NO slack shift
+        def cons_jac(x, g=g_fun):
+            J = np.asarray(g(*x), dtype=float).ravel()
+            return J
+        slsqp_cons.append({"type": "ineq", "fun": cons_fun, "jac": cons_jac})
 
-    ineq_f = [compile_scalar(e) for e in ineq_exprs]
-    ineq_g = [compile_grad(e)  for e in ineq_exprs]
-    eq_f   = [compile_scalar(e) for e in eq_exprs]
-    eq_g   = [compile_grad(e)  for e in eq_exprs]
+    # ---------- Feasibility finder (unchanged logic) ----------
+    def total_violation(x):
+        tv = 0.0
+        for f in ineq_funcs:
+            v = float(np.asarray(f(*x), dtype=float).reshape(()))
+            tv += max(0.0, -v)
+        for f in eq_funcs:
+            v = float(np.asarray(f(*x), dtype=float).reshape(()))
+            tv += abs(v)
+        for i in range(n_vars):
+            if np.isfinite(bounds.lb[i]) and x[i] < bounds.lb[i]:
+                tv += bounds.lb[i] - x[i]
+            if np.isfinite(bounds.ub[i]) and x[i] > bounds.ub[i]:
+                tv += x[i] - bounds.ub[i]
+        return tv
 
-    # ---------- NEW: choose a scaled space y = x / s ----------
-    # scale each variable to be O(1): use finite width if both bounds exist, else use max(1, |bound|, |mid|)
-    def mid_bounds():
+    def initial_guess():
         x0 = np.ones(n_vars, dtype=float)
         for i in range(n_vars):
-            lo, hi = lb[i], ub[i]
+            lo, hi = bounds.lb[i], bounds.ub[i]
             if np.isfinite(lo) and np.isfinite(hi) and lo < hi:
                 x0[i] = 0.5 * (lo + hi)
             elif np.isfinite(lo):
@@ -172,145 +197,62 @@ if st.button("Solve"):
                 x0[i] = min(hi - 1e-3, 1.0)
         return x0
 
-    x0 = mid_bounds()
-    # variable scales
-    s = np.ones(n_vars, dtype=float)
-    for i in range(n_vars):
-        if np.isfinite(lb[i]) and np.isfinite(ub[i]) and ub[i] > lb[i]:
-            s[i] = max(1.0, (ub[i] - lb[i]) / 2.0)
-        else:
-            s[i] = max(1.0, abs(x0[i]), abs(lb[i]) if np.isfinite(lb[i]) else 0.0, abs(ub[i]) if np.isfinite(ub[i]) else 0.0)
+    x0 = initial_guess()
 
-    # mapping
-    def to_x(y): return s * y
-    def to_y(x): return x / s
-
-    # scaled bounds
-    lb_y = lb / s
-    ub_y = ub / s
-    bounds_y = Bounds(lb_y, ub_y)
-
-    # ---------- NEW: objective scaling so magnitudes ~1 ----------
-    obj0 = obj_value(x0)
-    obj_scale = max(1.0, abs(obj0))
-    if not np.isfinite(obj_scale): obj_scale = 1.0
-
-    def f_y(y):
-        return obj_for_min(to_x(y)) / obj_scale
-
-    def g_y(y):
-        # chain rule: df/dy = s * df/dx
-        g = grad_for_min(to_x(y))
-        return (g * s) / obj_scale
-
-    # ---------- NEW: constraints in y-space with scaled gradients ----------
-    def make_ineq_fun(j):
-        f = ineq_f[j]; g = ineq_g[j]
-        def fun(y):
-            val = f(*to_x(y))
-            return float(np.asarray(val, float).reshape(()))
-        def jac(y):
-            gx = np.asarray(g(*to_x(y)), float).ravel()
-            return gx * s
-        return fun, jac
-
-    def make_eq_fun(j):
-        f = eq_f[j]; g = eq_g[j]
-        def fun(y):
-            val = f(*to_x(y))
-            return float(np.asarray(val, float).reshape(()))
-        def jac(y):
-            gx = np.asarray(g(*to_x(y)), float).ravel()
-            return gx * s
-        return fun, jac
-
-    # for SLSQP we only pass ineq constraints
-    slsqp_cons = []
-    for j in range(len(ineq_f)):
-        fun_j, _ = make_ineq_fun(j)
-        slsqp_cons.append({"type": "ineq", "fun": fun_j})
-
-    # ---------- Feasibility score (in y-space) ----------
-    def max_violation_y(y):
-        mv = 0.0
-        for j in range(len(ineq_f)):
-            v = make_ineq_fun(j)[0](y)
-            mv = max(mv, max(0.0, -v))
-        for j in range(len(eq_f)):
-            v = abs(make_eq_fun(j)[0](y))
-            mv = max(mv, v)
-        mv = max(mv, float(np.max(np.maximum(0.0, lb_y - y))))
-        mv = max(mv, float(np.max(np.maximum(0.0, y - ub_y))))
-        return mv
-
-    # ---------- Initial guess in y-space ----------
-    y0 = to_y(x0)
-
+    # Diagnostics
     st.write("Variables:", var_names)
-    st.write("Scale factors (x = s * y):", {var_names[i]: float(s[i]) for i in range(n_vars)})
-    st.write("Start (y-space):", {var_names[i]: float(y0[i]) for i in range(n_vars)})
+    st.write("Start point:", {var_names[i]: float(x0[i]) for i in range(n_vars)})
+    st.write("Total violation at start (≈0 is good):", total_violation(x0))
 
-    # ---------- Phase 1: SLSQP (fast) on scaled problem ----------
+    # ---------- Phase 1: SLSQP with exact constraint Jacobians (FIX ⬅) ----------
     try:
-        res1 = minimize(
-            f_y,
-            y0,
+        res = minimize(
+            obj_for_min,
+            x0,
             method="SLSQP",
-            jac=g_y,
-            bounds=bounds_y,
+            jac=grad_for_min,
+            bounds=bounds,
             constraints=slsqp_cons,
-            options=dict(ftol=1e-12, maxiter=5000, disp=False),  # CHANGED: tighter & more iters
+            options=dict(ftol=1e-12, maxiter=5000, disp=False),  # tighter
         )
     except Exception as e:
         st.error(f"SciPy failed to start SLSQP: {e}")
         st.stop()
 
-    y_cand = np.asarray(res1.x, float)
-
-    # ---------- Phase 2: trust-constr polish with exact constraint J ---------- 
-    # Build NonlinearConstraints in y-space
+    # ---------- Phase 2: ALWAYS polish with trust-constr (FIX ⬅) ----------
     nlcs = []
-    for j in range(len(ineq_f)):
-        fun_j, jac_j = make_ineq_fun(j)
-        nlcs.append(NonlinearConstraint(fun_j, 0.0, np.inf, jac=jac_j))
-    for j in range(len(eq_f)):
-        fun_j, jac_j = make_eq_fun(j)
-        nlcs.append(NonlinearConstraint(fun_j, 0.0, 0.0, jac=jac_j))
+    for f_fun, g_fun in zip(ineq_funcs, ineq_grads):
+        def fun(x, f=f_fun): return float(np.asarray(f(*x), float).reshape(()))
+        def jac(x, g=g_fun): return np.asarray(g(*x), float).ravel()
+        nlcs.append(NonlinearConstraint(fun, 0.0, np.inf, jac=jac))
+    for f_fun, g_fun in zip(eq_funcs, eq_grads):
+        def fun(x, f=f_fun): return float(np.asarray(f(*x), float).reshape(()))
+        def jac(x, g=g_fun): return np.asarray(g(*x), float).ravel()
+        nlcs.append(NonlinearConstraint(fun, 0.0, 0.0, jac=jac))
 
     try:
         res2 = minimize(
-            f_y,
-            y_cand,
+            obj_for_min,
+            res.x if np.all(np.isfinite(res.x)) else x0,
             method="trust-constr",
-            jac=g_y,
-            bounds=bounds_y,
+            jac=grad_for_min,
+            bounds=bounds,
             constraints=nlcs,
-            options=dict(xtol=1e-12, gtol=1e-12, barrier_tol=1e-12, maxiter=10000, verbose=0),  # CHANGED: much tighter
+            options=dict(xtol=1e-12, gtol=1e-12, barrier_tol=1e-12, maxiter=10000, verbose=0),
         )
-    except Exception as e:
-        res2 = res1  # fallback to SLSQP result
-
-    # pick the best (scaled objective already comparable)
-    cand = res2 if (getattr(res2, "success", False) and res2.fun <= res1.fun) else res1
+        cand = res2 if (res2.success and res2.fun <= res.fun) or not res.success else res
+    except Exception:
+        cand = res
 
     # ---------- Report ----------
-    x_sol = to_x(cand.x)
-    val_scaled = f_y(cand.x)
-    val = val_scaled * obj_scale
-    if max_or_min == "Maximize":
-        val = -val
-
-    viol = max_violation_y(cand.x)
-
-    if getattr(cand, "success", False) and viol <= 1e-9:
-        st.success(
-            "Optimal solution found:\n"
-            + "\n".join([f"{var_names[i]} = {pretty_round(x_sol[i])}" for i in range(n_vars)])
-            + f"\nObjective value: {pretty_round(val)}"
-        )
-        st.caption(f"Max residual (unscaled constraints & bounds) ≈ {viol:.2e}")
-    else:
-        st.error(f"Optimization not perfectly converged: {getattr(cand, 'message', 'unknown')}")
-        st.write("Best iterate found:", {var_names[i]: float(x_sol[i]) for i in range(n_vars)})
-        st.write("Max residual:", viol)
-        st.write("Objective (per your selection):", pretty_round(val))
+    def max_violation(x):
+        mv = 0.0
+        for f in ineq_funcs:
+            v = float(np.asarray(f(*x), dtype=float).reshape(()))
+            mv = max(mv, max(0.0, -v))
+        for f in eq_funcs:
+            v = abs(float(np.asarray(f(*x), dtype=float).reshape(())))
+            mv = max(mv, v)
+        for i in range(n_vars):
+            if np.isfinite(bounds.lb[i]): mv = max(mv, max(0.0, bounds.lb[i] - x[i]))
+            if np.isfinite(bounds.ub[i]): mv = max(mv

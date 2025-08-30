@@ -3,7 +3,7 @@ import numpy as np
 from scipy.optimize import minimize, Bounds, NonlinearConstraint
 import sympy as sp
 
-st.title("Constrained Optimization Solver (robust, custom variables)")
+st.title("Constrained Optimization Solver (exact J & H)")
 
 def pretty_round(x, tol=1e-6):
     try:
@@ -14,23 +14,24 @@ def pretty_round(x, tol=1e-6):
     return float(np.round(float(x), 6))
 
 # ---------------- UI ----------------
-var_names_str = st.text_input("Variable names (comma-separated)", "x, y, z")
+var_names_str = st.text_input("Variable names (comma-separated)", "wb, wg")
 max_or_min = st.selectbox("Problem type", ["Minimize", "Maximize"])
-objective_str = st.text_input("Objective function (use your variables)", "sqrt(x*y)*z")
-n_cons = st.number_input("Number of constraints (>= 0)", min_value=0, max_value=20, value=2, step=1)
+objective_str = st.text_input("Objective function (use your variables)", "50000 - wb/3 - 2*wg/3")
+n_cons = st.number_input("Number of constraints (>= 0)", min_value=0, max_value=20, value=3, step=1)
 constraints_str = [
-    st.text_input(f"Constraint {i+1} (e.g. x + y - 1 >= 0, or x + y <= 5, or x - y = 2)", "")
+    st.text_input(f"Constraint {i+1} (e.g. x + y - 1 >= 0, or x + y <= 5, or x - y = 2)", 
+                  "wb >= 0" if i==0 else ("wg >= 0" if i==1 else "2*sqrt(wg)/3 + sqrt(wb)/3 - 150 >= 0"),
+                  key=f"c{i}")
     for i in range(n_cons)
 ]
 
 # Optional bounds editor (defaults to nonnegativity if left blank)
 st.markdown("**Bounds per variable (optional):** leave blank for no bound. Use numbers, e.g. 0 or 10.")
-lb_inputs = []
-ub_inputs = []
+lb_inputs, ub_inputs = [], []
 for v in [v.strip() for v in var_names_str.split(",") if v.strip()]:
-    cols = st.columns(2)
-    lb_inputs.append(cols[0].text_input(f"Lower bound for {v}", "0"))
-    ub_inputs.append(cols[1].text_input(f"Upper bound for {v}", ""))
+    c1, c2 = st.columns(2)
+    lb_inputs.append(c1.text_input(f"Lower bound for {v}", "0"))
+    ub_inputs.append(c2.text_input(f"Upper bound for {v}", ""))
 
 if st.button("Solve"):
     # ---------- Parse variables ----------
@@ -50,7 +51,7 @@ if st.button("Solve"):
     allowed_syms = set(x_syms)
     n_vars = len(var_names)
 
-    # ---------- Parse bounds ----------
+    # ---------- Bounds ----------
     def parse_bound(text):
         t = (text or "").strip()
         if t == "": return None
@@ -61,14 +62,12 @@ if st.button("Solve"):
 
     lbs = [parse_bound(s) for s in lb_inputs[:n_vars]]
     ubs = [parse_bound(s) for s in ub_inputs[:n_vars]]
-    # default to nonnegativity if completely unspecified in the UI row
     for i in range(n_vars):
         if lb_inputs[i].strip() == "" and ub_inputs[i].strip() == "":
-            if lbs[i] is None: lbs[i] = 0.0
-            # ub stays None
+            if lbs[i] is None: lbs[i] = 0.0  # default to nonnegativity
 
-    lb = np.array([(-np.inf if b is None else b) for b in lbs], dtype=float)
-    ub = np.array([( np.inf if b is None else b) for b in ubs], dtype=float)
+    lb = np.array([(-np.inf if b is None else b) for b in lbs], float)
+    ub = np.array([( np.inf if b is None else b) for b in ubs], float)
     bounds = Bounds(lb, ub)
 
     # ---------- Shared helpers ----------
@@ -85,49 +84,29 @@ if st.button("Solve"):
             names = ", ".join(sorted(str(s) for s in extra))
             st.error(f"{what.capitalize()} uses unknown variables: {names}. Add them to 'Variable names'.")
             st.stop()
-        return expr
+        return sp.simplify(expr)
 
-    # ---------- Objective ----------
+    # ---------- Objective (value, grad, Hessian) ----------
     obj_expr = parse_and_validate(objective_str, what="objective")
+    if max_or_min == "Maximize":
+        obj_expr = -obj_expr  # minimize always
+
     obj_grad_syms = [sp.diff(obj_expr, s) for s in x_syms]
+    obj_hess_syms = sp.hessian(obj_expr, x_syms)
 
-    try:
-        obj_func = sp.lambdify(x_syms, obj_expr, modules=LAMBDA_MODULES)
-        obj_grad = sp.lambdify(x_syms, obj_grad_syms, modules=LAMBDA_MODULES)
-    except Exception as e:
-        st.error(f"Error compiling objective: {e}")
-        st.stop()
+    obj_val  = sp.lambdify(x_syms, obj_expr, modules=LAMBDA_MODULES)
+    obj_grad = sp.lambdify(x_syms, obj_grad_syms, modules=LAMBDA_MODULES)
+    obj_hess = sp.lambdify(x_syms, obj_hess_syms, modules=LAMBDA_MODULES)
 
-    def obj_for_min(x):
-        val = obj_func(*x)
-        v = float(np.asarray(val, dtype=float).reshape(()))
-        return -v if max_or_min == "Maximize" else v
+    def f(x):  # scalar
+        return float(np.asarray(obj_val(*x), float).reshape(()))
+    def g(x):  # gradient (n,)
+        return np.asarray(obj_grad(*x), float).ravel()
+    def H(x):  # Hessian (n,n)
+        return np.asarray(obj_hess(*x), float)
 
-    def grad_for_min(x):
-        g = np.asarray(obj_grad(*x), dtype=float).ravel()
-        return -g if max_or_min == "Maximize" else g
-
-    # ---------- Constraints parsing (>=, <=, = supported) ----------
-    #   - for >= : g(x) = lhs - rhs  (want g >= 0)
-    #   - for <= : g(x) = rhs - lhs  (want g >= 0)
-    #   - for  = : h(x) = lhs - rhs  (want h = 0)
-    ineq_funcs = []    # g(x)
-    ineq_grads = []    # ∇g
-    eq_funcs = []      # h(x)
-    eq_grads = []      # ∇h
-
-    def compile_scalar(expr):
-        return sp.lambdify(x_syms, expr, modules=LAMBDA_MODULES)
-    def compile_grad(expr):
-        grads = [sp.diff(expr, s) for s in x_syms]
-        return sp.lambdify(x_syms, grads, modules=LAMBDA_MODULES)
-
-    def add_ineq(expr):
-        ineq_funcs.append(compile_scalar(expr))
-        ineq_grads.append(compile_grad(expr))
-    def add_eq(expr):
-        eq_funcs.append(compile_scalar(expr))
-        eq_grads.append(compile_grad(expr))
+    # ---------- Constraints: compile value, gradient, Hessian ----------
+    ineq_trips, eq_trips = [], []  # each triplet: (val(x)->float, jac(x)->(n,), hess(x)->(n,n))
 
     def split_constraint(text):
         if ">=" in text:
@@ -143,52 +122,39 @@ if st.button("Solve"):
             st.stop()
         return lhs.strip(), rhs.strip(), op
 
+    def compile_triplet(expr):
+        grad = [sp.diff(expr, s) for s in x_syms]
+        hess = sp.hessian(expr, x_syms)
+        f_  = sp.lambdify(x_syms, expr, modules=LAMBDA_MODULES)
+        g_  = sp.lambdify(x_syms, grad, modules=LAMBDA_MODULES)
+        H_  = sp.lambdify(x_syms, hess, modules=LAMBDA_MODULES)
+        def val(x):
+            return float(np.asarray(f_(*x), float).reshape(()))
+        def jac(x):
+            return np.asarray(g_(*x), float).ravel()
+        def hes(x):
+            return np.asarray(H_(*x), float)
+        return val, jac, hes
+
     for idx, c_str in enumerate(constraints_str, start=1):
         c_str = c_str.strip()
-        if not c_str:
-            continue
+        if not c_str: continue
         lhs_s, rhs_s, op = split_constraint(c_str)
         lhs = parse_and_validate(lhs_s, what=f"constraint {idx} (lhs)")
         rhs = parse_and_validate(rhs_s, what=f"constraint {idx} (rhs)")
         expr = sp.simplify(lhs - rhs)
         if op == ">=":
-            add_ineq(expr)
+            ineq_trips.append(compile_triplet(expr))                 # g(x) >= 0
         elif op == "<=":
-            add_ineq(sp.simplify(rhs - lhs))
+            ineq_trips.append(compile_triplet(sp.simplify(rhs - lhs)))  # convert to >= 0
         else:
-            add_eq(expr)
+            eq_trips.append(compile_triplet(expr))                   # h(x) == 0
 
-    # ---------- SLSQP constraints with ANALYTIC JACOBIANS (FIX ⬅) ----------
-    slsqp_cons = []
-    for f_fun, g_fun in zip(ineq_funcs, ineq_grads):
-        def cons_fun(x, f=f_fun):
-            val = f(*x)
-            return float(np.asarray(val, dtype=float).reshape(()))   # NO slack shift
-        def cons_jac(x, g=g_fun):
-            J = np.asarray(g(*x), dtype=float).ravel()
-            return J
-        slsqp_cons.append({"type": "ineq", "fun": cons_fun, "jac": cons_jac})
-
-    # ---------- Feasibility finder (unchanged logic) ----------
-    def total_violation(x):
-        tv = 0.0
-        for f in ineq_funcs:
-            v = float(np.asarray(f(*x), dtype=float).reshape(()))
-            tv += max(0.0, -v)
-        for f in eq_funcs:
-            v = float(np.asarray(f(*x), dtype=float).reshape(()))
-            tv += abs(v)
-        for i in range(n_vars):
-            if np.isfinite(bounds.lb[i]) and x[i] < bounds.lb[i]:
-                tv += bounds.lb[i] - x[i]
-            if np.isfinite(bounds.ub[i]) and x[i] > bounds.ub[i]:
-                tv += x[i] - bounds.ub[i]
-        return tv
-
-    def initial_guess():
+    # ---------- Initial guess ----------
+    def mid_bounds():
         x0 = np.ones(n_vars, dtype=float)
         for i in range(n_vars):
-            lo, hi = bounds.lb[i], bounds.ub[i]
+            lo, hi = lb[i], ub[i]
             if np.isfinite(lo) and np.isfinite(hi) and lo < hi:
                 x0[i] = 0.5 * (lo + hi)
             elif np.isfinite(lo):
@@ -197,62 +163,86 @@ if st.button("Solve"):
                 x0[i] = min(hi - 1e-3, 1.0)
         return x0
 
-    x0 = initial_guess()
+    x0 = mid_bounds()
 
-    # Diagnostics
-    st.write("Variables:", var_names)
-    st.write("Start point:", {var_names[i]: float(x0[i]) for i in range(n_vars)})
-    st.write("Total violation at start (≈0 is good):", total_violation(x0))
+    # ---------- SLSQP with EXACT Jacobians for ineq (NEW) ----------
+    slsqp_cons = []
+    for (val_fun, jac_fun, _) in ineq_trips:
+        slsqp_cons.append({"type": "ineq",
+                           "fun":  lambda x, f=val_fun:  float(np.asarray(f(x), float).reshape(())),
+                           "jac":  lambda x, j=jac_fun:  np.asarray(j(x), float).ravel()})
 
-    # ---------- Phase 1: SLSQP with exact constraint Jacobians (FIX ⬅) ----------
     try:
-        res = minimize(
-            obj_for_min,
-            x0,
-            method="SLSQP",
-            jac=grad_for_min,
+        res1 = minimize(
+            f, x0, method="SLSQP",
+            jac=g,
             bounds=bounds,
             constraints=slsqp_cons,
-            options=dict(ftol=1e-12, maxiter=5000, disp=False),  # tighter
+            options=dict(ftol=1e-12, maxiter=5000, disp=False)  # tighter
         )
     except Exception as e:
-        st.error(f"SciPy failed to start SLSQP: {e}")
+        st.error(f"SLSQP failed to start: {e}")
         st.stop()
 
-    # ---------- Phase 2: ALWAYS polish with trust-constr (FIX ⬅) ----------
+    # ---------- ALWAYS polish with trust-constr using exact Hessians (NEW) ----------
     nlcs = []
-    for f_fun, g_fun in zip(ineq_funcs, ineq_grads):
-        def fun(x, f=f_fun): return float(np.asarray(f(*x), float).reshape(()))
-        def jac(x, g=g_fun): return np.asarray(g(*x), float).ravel()
-        nlcs.append(NonlinearConstraint(fun, 0.0, np.inf, jac=jac))
-    for f_fun, g_fun in zip(eq_funcs, eq_grads):
-        def fun(x, f=f_fun): return float(np.asarray(f(*x), float).reshape(()))
-        def jac(x, g=g_fun): return np.asarray(g(*x), float).ravel()
-        nlcs.append(NonlinearConstraint(fun, 0.0, 0.0, jac=jac))
+
+    for (val_fun, jac_fun, hess_fun) in ineq_trips:
+        def fun(x, f=val_fun): return float(np.asarray(f(x), float).reshape(()))
+        def jac(x, j=jac_fun): return np.asarray(j(x), float).ravel()
+        def hess(x, v, Hc=hess_fun):      # v is scalar multiplier passed by trust-constr
+            return v * np.asarray(Hc(x), float)
+        nlcs.append(NonlinearConstraint(fun, 0.0, np.inf, jac=jac, hess=hess))
+
+    for (val_fun, jac_fun, hess_fun) in eq_trips:
+        def fun(x, f=val_fun): return float(np.asarray(f(x), float).reshape(()))
+        def jac(x, j=jac_fun): return np.asarray(j(x), float).ravel()
+        def hess(x, v, Hc=hess_fun):
+            return v * np.asarray(Hc(x), float)
+        nlcs.append(NonlinearConstraint(fun, 0.0, 0.0, jac=jac, hess=hess))
 
     try:
         res2 = minimize(
-            obj_for_min,
-            res.x if np.all(np.isfinite(res.x)) else x0,
+            f,
+            res1.x if np.all(np.isfinite(res1.x)) else x0,
             method="trust-constr",
-            jac=grad_for_min,
+            jac=g,
+            hess=H,                         # exact objective Hessian (NEW)
             bounds=bounds,
-            constraints=nlcs,
-            options=dict(xtol=1e-12, gtol=1e-12, barrier_tol=1e-12, maxiter=10000, verbose=0),
+            constraints=nlcs,               # each with exact jac & hess
+            options=dict(xtol=1e-12, gtol=1e-12, barrier_tol=1e-14, maxiter=20000, verbose=0),
         )
-        cand = res2 if (res2.success and res2.fun <= res.fun) or not res.success else res
+        cand = res2 if (res2.success and res2.fun <= res1.fun) else res1
     except Exception:
-        cand = res
+        cand = res1
 
-    # ---------- Report ----------
+    # ---------- Feasibility check ----------
     def max_violation(x):
         mv = 0.0
-        for f in ineq_funcs:
-            v = float(np.asarray(f(*x), dtype=float).reshape(()))
+        for (val_fun, _, _) in ineq_trips:
+            v = float(np.asarray(val_fun(x), float).reshape(()))
             mv = max(mv, max(0.0, -v))
-        for f in eq_funcs:
-            v = abs(float(np.asarray(f(*x), dtype=float).reshape(())))
+        for (val_fun, _, _) in eq_trips:
+            v = abs(float(np.asarray(val_fun(x), float).reshape(())))
             mv = max(mv, v)
-        for i in range(n_vars):
-            if np.isfinite(bounds.lb[i]): mv = max(mv, max(0.0, bounds.lb[i] - x[i]))
-            if np.isfinite(bounds.ub[i]): mv = max(mv
+        mv = max(mv, float(np.max(np.maximum(0.0, lb - x))))
+        mv = max(mv, float(np.max(np.maximum(0.0, x - ub))))
+        return mv
+
+    # ---------- Report ----------
+    x_star = np.asarray(cand.x, float)
+    val = float(f(x_star))
+    if max_or_min == "Maximize":
+        val = -val
+
+    if getattr(cand, "success", False) and max_violation(x_star) <= 1e-9:
+        st.success(
+            "Optimal solution found:\n"
+            + "\n".join([f"{var_names[i]} = {pretty_round(x_star[i])}" for i in range(n_vars)])
+            + f"\nObjective value: {pretty_round(val)}"
+        )
+    else:
+        st.error(f"Optimization not perfectly converged: {getattr(cand, 'message', 'unknown')}")
+        st.write("Best iterate found:", {var_names[i]: float(x_star[i]) for i in range(n_vars)})
+        st.write("Max constraint/bound residual:", max_violation(x_star))
+        st.write("Objective (per your selection):", pretty_round(val))
